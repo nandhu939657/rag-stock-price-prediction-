@@ -21,6 +21,7 @@ from app.ingestion.market_data_client import MarketDataUnconfigured, fetch_recen
 from app.llm.groq_client import generate_recommendation
 from app.ml.features import build_feature_frame, latest_feature_vector
 from app.ml.model import get_model_service
+from app.ml.risk import assess_risk
 from app.rag.guardrails import apply_fallback, assemble_system_prompt, validate_output
 from app.rag.prompt_templates import build_user_message
 from app.rag.retriever import retrieve_relevant_chunks, retrieve_relevant_strategies
@@ -78,6 +79,19 @@ def _build_situation_query(ml_prediction, latest_indicators: dict, has_price_dat
             descriptors.append("price near lower Bollinger band")
 
     return "Stock technical situation: " + ", ".join(descriptors)
+
+
+def _get_latest_recommendation(stock_id: str) -> dict | None:
+    supabase = get_supabase()
+    resp = (
+        supabase.table("recommendations")
+        .select("*")
+        .eq("stock_id", stock_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
 
 
 def _get_or_create_stock(ticker: str, name: str | None) -> dict:
@@ -234,6 +248,39 @@ async def analyze_stock(
     else:
         ml_prediction = get_model_service().predict(None)
 
+    # Risk assessment - concrete, explainable factors (volatility, confidence, data
+    # availability), computed deterministically here rather than left to the LLM, so it
+    # can't be inconsistent between two calls with the same underlying numbers.
+    risk = assess_risk(
+        latest_indicators=latest_indicators,
+        ml_confidence=ml_prediction.confidence,
+        ml_is_heuristic=ml_prediction.is_heuristic,
+        has_price_data=has_price_data,
+    )
+
+    # For scheduled refreshes only, skip the whole news-scrape + Groq call if literally
+    # nothing has changed since the last check (e.g. a market outside trading hours
+    # keeps returning the same last-closed bar). Re-running the full pipeline for an
+    # identical technical situation just burns Groq's daily token quota - and free-tier
+    # quotas are tight enough that a handful of tracked stocks polling every 5 minutes
+    # can exhaust a day's budget in hours, silently forcing every later call (real or
+    # not) into the generic "service unavailable" fallback. Reuse the prior
+    # recommendation instead; on_demand calls (the user explicitly asked) always run
+    # fresh regardless.
+    if triggered_by == "scheduled" and has_price_data:
+        previous = _get_latest_recommendation(stock_id)
+        if previous:
+            prev_indicators = (previous.get("context_snapshot") or {}).get("latest_indicators") or {}
+            prev_close = prev_indicators.get("close")
+            current_close = latest_indicators.get("close")
+            if prev_close is not None and current_close is not None and float(prev_close) == float(current_close):
+                logger.info("No new price bar for %s since last check - reusing prior recommendation, skipping Groq call.", ticker)
+                supabase.table("tracked_stocks").update(
+                    {"last_refreshed_at": datetime.now(timezone.utc).isoformat()}
+                ).eq("stock_id", stock_id).execute()
+                previous["ticker"] = ticker
+                return previous
+
     # News ingestion (best-effort, rate-limited by staleness check) + RAG retrieval
     await _maybe_scrape_news(stock_id, ticker, display_name)
     retrieved_chunks = retrieve_relevant_chunks(stock_id, f"{display_name} {ticker} recent news and outlook")
@@ -282,8 +329,11 @@ async def analyze_stock(
         "guardrails_applied": [r["rule_key"] for r in guardrail_rules],
         "context_snapshot": {
             "has_price_data": has_price_data,
+            "is_fallback": result.get("is_fallback", False),
+            "fallback_reason": result.get("fallback_reason"),
             "latest_indicators": {k: (v if not hasattr(v, "isoformat") else v.isoformat()) for k, v in latest_indicators.items()},
             "retrieved_chunk_ids": [c.get("id") for c in retrieved_chunks],
+            **risk.to_dict(),
             "strategies_considered": [
                 {
                     "book_title": s.get("book_title"),

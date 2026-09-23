@@ -11,6 +11,8 @@ import logging
 import pathlib
 from typing import Literal
 
+from app.ml.features import DIRECTION_LABELS
+
 logger = logging.getLogger(__name__)
 
 ARTIFACTS_DIR = pathlib.Path(__file__).parent / "artifacts"
@@ -88,10 +90,14 @@ class ModelService:
         assert self.feature_columns is not None
         x = np.array([[feature_vector[c] for c in self.feature_columns]])
 
-        proba = self.classifier.predict_proba(x)[0]  # order: classes_ e.g. [down, flat, up]
-        classes = list(self.classifier.classes_)
+        # The classifier was trained on integer-encoded labels (0=down, 1=flat, 2=up -
+        # see DIRECTION_LABELS in app/ml/features.py and how train.py encodes before
+        # fit()), so predict_proba's column order matches DIRECTION_LABELS directly -
+        # decode through that same fixed list rather than self.classifier.classes_
+        # (which would just be [0, 1, 2], not the string signal names).
+        proba = self.classifier.predict_proba(x)[0]
         pred_idx = int(np.argmax(proba))
-        signal: Signal = classes[pred_idx]
+        signal: Signal = DIRECTION_LABELS[pred_idx]
         confidence = float(proba[pred_idx])
 
         predicted_return = float(self.regressor.predict(x)[0])
@@ -100,29 +106,45 @@ class ModelService:
 
     @staticmethod
     def _predict_heuristic(feature_vector: dict[str, float]) -> MLPrediction:
-        """RSI/MACD threshold fallback - used until train.py has produced a real model,
-        or when a stock has too little history for the trained model's feature set."""
+        """RSI/MACD/Bollinger threshold fallback - used until train.py has produced a
+        real model, or when a stock has too little history for the trained model's
+        feature set. Deliberately NOT a flat constant: confidence and predicted_return
+        are both derived from how extreme and how aligned the underlying indicators
+        actually are, so two different technical pictures produce two different
+        numbers instead of always reporting the same placeholder value regardless of
+        input. Still capped well below what a genuinely trained model could claim,
+        since three threshold rules are a much cruder signal than a trained model."""
         rsi = feature_vector.get("rsi_14", 50.0)
         macd_hist = feature_vector.get("macd_hist", 0.0)
+        bollinger_position = feature_vector.get("bollinger_position", 0.5)
 
-        score = 0
-        if rsi < 30:
-            score += 1
-        elif rsi > 70:
-            score -= 1
-        if macd_hist > 0:
-            score += 1
-        elif macd_hist < 0:
-            score -= 1
+        rsi_direction = 1 if rsi < 30 else (-1 if rsi > 70 else 0)
+        rsi_strength = min(abs(rsi - 50) / 50, 1.0)  # 0 at neutral (50), 1 at the extremes (0/100)
 
-        if score >= 1:
+        macd_direction = 1 if macd_hist > 0 else (-1 if macd_hist < 0 else 0)
+
+        boll_direction = 1 if bollinger_position < 0.15 else (-1 if bollinger_position > 0.85 else 0)
+        boll_strength = min(abs(bollinger_position - 0.5) / 0.5, 1.0)  # 0 at mid-band, 1 at either edge
+
+        votes = [v for v in (rsi_direction, macd_direction, boll_direction) if v != 0]
+        net = sum(votes)
+
+        if net > 0:
             signal: Signal = "up"
-        elif score <= -1:
+        elif net < 0:
             signal = "down"
         else:
             signal = "flat"
 
-        return MLPrediction(signal=signal, predicted_return=0.0, confidence=0.25, is_heuristic=True)
+        agreement = abs(net) / 3  # fraction of the 3 signals that agree with the winning direction
+        avg_strength = (rsi_strength + boll_strength) / 2
+        confidence = round(min(0.15 + 0.25 * agreement + 0.15 * avg_strength, 0.55), 2)
+
+        # Rough, sign-consistent return estimate from how far RSI sits from neutral -
+        # not a real regression, just enough to avoid reporting a hard 0.0 every time.
+        predicted_return = round(((50 - rsi) / 50) * 0.01, 4)
+
+        return MLPrediction(signal=signal, predicted_return=predicted_return, confidence=confidence, is_heuristic=True)
 
 
 def get_model_service() -> ModelService:

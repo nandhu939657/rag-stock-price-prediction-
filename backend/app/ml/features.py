@@ -7,6 +7,7 @@ volatility_20).
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 FEATURE_COLUMNS = [
@@ -27,6 +28,13 @@ FEATURE_COLUMNS = [
 
 MIN_BARS_FOR_FEATURES = 21  # need at least return_20 to be meaningful
 
+# Fixed encode/decode order for the direction classifier's labels. XGBoost's sklearn
+# wrapper requires integer class labels (0..n-1), not strings - train.py encodes
+# "direction" through this list's index before fit(), and model.py decodes
+# predict_proba's column index back through the same list. Defined once, here, and
+# imported by both, so the two can never drift out of sync with each other.
+DIRECTION_LABELS = ["down", "flat", "up"]
+
 
 def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     """Adds FEATURE_COLUMNS to df (already sorted oldest-first, indicators present)."""
@@ -38,13 +46,17 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     df["return_10"] = close.pct_change(10)
     df["return_20"] = close.pct_change(20)
 
-    df["price_to_sma20"] = (close / df["sma_20"].replace(0, pd.NA)) - 1
-    df["price_to_ema20"] = (close / df["ema_20"].replace(0, pd.NA)) - 1
+    # np.nan (not pd.NA) deliberately - pd.NA on a plain float64 column silently
+    # upcasts it to `object` dtype, which XGBoost then rejects outright
+    # ("DataFrame.dtypes for data must be int, float, bool or category"). np.nan stays
+    # within float64 the whole way through, which is what these columns already are.
+    df["price_to_sma20"] = (close / df["sma_20"].replace(0, np.nan)) - 1
+    df["price_to_ema20"] = (close / df["ema_20"].replace(0, np.nan)) - 1
 
-    band_width = (df["bollinger_upper"] - df["bollinger_lower"]).replace(0, pd.NA)
+    band_width = (df["bollinger_upper"] - df["bollinger_lower"]).replace(0, np.nan)
     df["bollinger_position"] = ((close - df["bollinger_lower"]) / band_width).clip(0, 1)
 
-    avg_volume = df["volume"].rolling(window=20, min_periods=1).mean().replace(0, pd.NA)
+    avg_volume = df["volume"].rolling(window=20, min_periods=1).mean().replace(0, np.nan)
     df["volume_ratio"] = df["volume"] / avg_volume
 
     return df

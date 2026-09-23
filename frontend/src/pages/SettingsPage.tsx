@@ -37,7 +37,7 @@ export function SettingsPage() {
   };
 
   return (
-    <div>
+    <div style={{ maxWidth: 900 }}>
       <div className="page-header">
         <div>
           <h1 className="page-title">Settings &amp; About</h1>

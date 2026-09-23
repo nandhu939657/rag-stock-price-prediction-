@@ -87,7 +87,7 @@ export function WatchlistDashboardPage() {
       )}
 
       {loading && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {[0, 1, 2].map((i) => (
             <CardSkeleton key={i} />
           ))}
@@ -126,7 +126,7 @@ export function WatchlistDashboardPage() {
           {visible.length === 0 ? (
             <div className="empty-state">No stocks match this filter.</div>
           ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               {visible.map((s) => (
                 <TrackedStockCard key={s.stock_id} stock={s} onChanged={refresh} />
               ))}

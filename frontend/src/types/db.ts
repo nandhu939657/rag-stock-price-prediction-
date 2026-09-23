@@ -1,5 +1,6 @@
 export type RecommendationValue = "buy" | "sell" | "hold";
 export type MlSignal = "up" | "down" | "flat";
+export type RiskLevel = "low" | "medium" | "high";
 
 export interface StrategyConsidered {
   book_title: string;
@@ -21,7 +22,23 @@ export interface Recommendation {
   reasoning: string;
   guardrails_applied: string[];
   triggered_by: "scheduled" | "on_demand";
-  context_snapshot?: { has_price_data?: boolean; strategies_considered?: StrategyConsidered[] } | null;
+  context_snapshot?: {
+    has_price_data?: boolean;
+    is_fallback?: boolean;
+    fallback_reason?: "quota_exhausted" | "service_error" | "unparseable_response" | null;
+    strategies_considered?: StrategyConsidered[];
+    risk_level?: RiskLevel;
+    risk_summary?: string;
+    risk_factors?: string[];
+    risk_score?: number;
+    latest_indicators?: {
+      return_1?: number | null;
+      return_5?: number | null;
+      return_10?: number | null;
+      return_20?: number | null;
+      [key: string]: unknown;
+    };
+  } | null;
 }
 
 export interface TrackedStock {

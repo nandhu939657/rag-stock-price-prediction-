@@ -19,3 +19,11 @@ export function addRecentSearch(ticker: string): void {
     // ignore - private browsing / blocked storage
   }
 }
+
+export function clearRecentSearches(): void {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // ignore - private browsing / blocked storage
+  }
+}

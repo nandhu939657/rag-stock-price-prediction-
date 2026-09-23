@@ -1,14 +1,44 @@
 import { useEffect, useRef, useState } from "react";
-import { Search as SearchIcon, Loader2, Clock, CircleAlert, ArrowRight } from "lucide-react";
+import { Search as SearchIcon, Loader2, Clock, CircleAlert, ArrowRight, TrendingUp, TrendingDown, Sparkles, X } from "lucide-react";
 import { api, ApiError } from "../lib/apiClient";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
-import { addRecentSearch, getRecentSearches } from "../lib/recentSearches";
-import type { PriceBar, Recommendation, SymbolSearchResult } from "../types/db";
+import { addRecentSearch, clearRecentSearches, getRecentSearches } from "../lib/recentSearches";
+import type { Mover, MoversResponse, NewsSource, PriceBar, Recommendation, SymbolSearchResult } from "../types/db";
 import { AddToWatchlistButton } from "../components/AddToWatchlistButton";
 import { DisclaimerBanner, ReasoningPanel } from "../components/ReasoningPanel";
 import { PriceChart } from "../components/PriceChart";
 import { IndicatorPanel } from "../components/IndicatorPanel";
 import { useToast } from "../components/ui/Toast";
+
+// A handful of well-known tickers spanning every market this app covers, so a
+// first-time visitor with no history and no analyzed stocks yet still has something
+// concrete to click instead of staring at an empty input.
+const QUICK_PICKS: SymbolSearchResult[] = [
+  { ticker: "AAPL", name: "Apple Inc.", exchange: "US", has_price_data: true },
+  { ticker: "MSFT", name: "Microsoft Corporation", exchange: "US", has_price_data: true },
+  { ticker: "00700.HK", name: "Tencent Holdings", exchange: "Hong Kong", has_price_data: true },
+  { ticker: "TATASTEEL.IN", name: "Tata Steel Limited", exchange: "India", has_price_data: true },
+  { ticker: "600519.SH", name: "Kweichow Moutai", exchange: "China", has_price_data: true },
+];
+
+function MoverRow({ mover, onClick }: { mover: Mover; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="card card-hover"
+      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--color-surface)", border: "1px solid var(--color-border)", cursor: "pointer", textAlign: "left" }}
+    >
+      <span>
+        <strong>{mover.ticker}</strong>
+        <span className="text-muted" style={{ fontSize: 12 }}> — {mover.name}</span>
+      </span>
+      <span style={{ fontWeight: 700, fontSize: 12.5, color: mover.change_pct >= 0 ? "var(--color-buy)" : "var(--color-sell)" }}>
+        {mover.change_pct >= 0 ? "+" : ""}
+        {mover.change_pct}%
+      </span>
+    </button>
+  );
+}
 
 export function SearchAnalyzePage() {
   const [query, setQuery] = useState("");
@@ -20,10 +50,16 @@ export function SearchAnalyzePage() {
   const [selected, setSelected] = useState<SymbolSearchResult | null>(null);
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
   const [priceHistory, setPriceHistory] = useState<PriceBar[]>([]);
+  const [sources, setSources] = useState<NewsSource[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [recent, setRecent] = useState<string[]>(getRecentSearches);
+  const [movers, setMovers] = useState<MoversResponse | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const { push } = useToast();
+
+  useEffect(() => {
+    api.movers(4).then(setMovers).catch(() => setMovers(null));
+  }, []);
 
   useEffect(() => {
     if (!debouncedQuery.trim() || debouncedQuery.length < 1) {
@@ -63,6 +99,7 @@ export function SearchAnalyzePage() {
     setError(null);
     setRecommendation(null);
     setPriceHistory([]);
+    setSources([]);
     try {
       const rec = await api.analyze(symbol.ticker, symbol.name);
       setRecommendation(rec);
@@ -71,7 +108,10 @@ export function SearchAnalyzePage() {
       // Best-effort - the recommendation itself is already usable even if this fails.
       api
         .history(symbol.ticker)
-        .then((h) => setPriceHistory(h.price_history))
+        .then((h) => {
+          setPriceHistory(h.price_history);
+          setSources(h.sources);
+        })
         .catch(() => {});
     } catch (e) {
       const message = e instanceof ApiError ? e.message : "Analysis failed";
@@ -101,7 +141,7 @@ export function SearchAnalyzePage() {
         </div>
       </div>
 
-      <div ref={boxRef} style={{ position: "relative", marginBottom: 24 }}>
+      <div ref={boxRef} style={{ position: "relative", marginBottom: 24, maxWidth: 640 }}>
         <div style={{ position: "relative" }}>
           <SearchIcon size={15} style={{ position: "absolute", left: 12, top: 11, color: "var(--color-text-faint)" }} />
           <input
@@ -205,6 +245,97 @@ export function SearchAnalyzePage() {
         )}
       </div>
 
+      {!analyzing && !recommendation && !error && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 20 }}>
+          {recent.length > 0 && (
+            <section>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <h2 className="kicker" style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
+                  <Clock size={13} /> Recent searches
+                </h2>
+                <button
+                  onClick={() => {
+                    clearRecentSearches();
+                    setRecent([]);
+                  }}
+                  className="btn btn-ghost btn-sm"
+                  style={{ color: "var(--color-text-faint)" }}
+                >
+                  <X size={11} /> Clear
+                </button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {recent.map((ticker) => (
+                  <button
+                    key={ticker}
+                    onClick={() => runAnalysis({ ticker, name: ticker, has_price_data: true, exchange: null, alternative_ticker: null })}
+                    className="btn btn-secondary btn-sm"
+                  >
+                    {ticker}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section>
+            <h2 className="kicker" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <Sparkles size={13} /> Popular picks
+            </h2>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {QUICK_PICKS.map((p) => (
+                <button
+                  key={p.ticker}
+                  onClick={() => runAnalysis(p)}
+                  className="card card-hover"
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--color-surface)", border: "1px solid var(--color-border)", cursor: "pointer", textAlign: "left" }}
+                >
+                  <span>
+                    <strong>{p.ticker}</strong>
+                    <span className="text-muted" style={{ fontSize: 12 }}> — {p.name}</span>
+                  </span>
+                  <span className="text-faint" style={{ fontSize: 11 }}>{p.exchange}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {movers && (movers.gainers.length > 0 || movers.losers.length > 0) && (
+            <>
+              <section>
+                <h2 className="kicker" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <TrendingUp size={13} color="var(--color-buy)" /> Trending up
+                </h2>
+                {movers.gainers.length === 0 ? (
+                  <div className="text-faint" style={{ fontSize: 12.5 }}>Nothing to show yet — analyze a few stocks first.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {movers.gainers.map((m) => (
+                      <MoverRow key={m.stock_id} mover={m} onClick={() => runAnalysis({ ticker: m.ticker, name: m.name, has_price_data: true, exchange: null, alternative_ticker: null })} />
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section>
+                <h2 className="kicker" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <TrendingDown size={13} color="var(--color-sell)" /> Trending down
+                </h2>
+                {movers.losers.length === 0 ? (
+                  <div className="text-faint" style={{ fontSize: 12.5 }}>Nothing to show yet — analyze a few stocks first.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {movers.losers.map((m) => (
+                      <MoverRow key={m.stock_id} mover={m} onClick={() => runAnalysis({ ticker: m.ticker, name: m.name, has_price_data: true, exchange: null, alternative_ticker: null })} />
+                    ))}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </div>
+      )}
+
       {analyzing && (
         <div className="empty-state" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
           <Loader2 size={15} className="spin" />
@@ -222,7 +353,7 @@ export function SearchAnalyzePage() {
             </h2>
             <AddToWatchlistButton ticker={selected.ticker} />
           </div>
-          <ReasoningPanel recommendation={recommendation} />
+          <ReasoningPanel recommendation={recommendation} sources={sources} />
 
           {priceHistory.length > 0 && (
             <>

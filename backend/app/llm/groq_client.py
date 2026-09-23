@@ -42,6 +42,8 @@ def _parse_response(raw_text: str) -> dict:
     return {
         "recommendation": rec,
         "reasoning": raw_text.strip() or "Model response could not be parsed; defaulted to hold as a precaution. This is not financial advice.",
+        "is_fallback": True,
+        "fallback_reason": "unparseable_response",
     }
 
 
@@ -68,9 +70,12 @@ def generate_recommendation(system_prompt: str, user_message: str) -> dict:
         raw_text = completion.choices[0].message.content or ""
     except Exception as e:  # noqa: BLE001
         logger.error("Groq call failed: %s", e)
+        is_quota = "rate_limit_exceeded" in str(e) or "429" in str(e)
         return {
             "recommendation": "hold",
             "reasoning": "The analysis service is temporarily unavailable, defaulting to hold as a precaution. This is not financial advice.",
+            "is_fallback": True,
+            "fallback_reason": "quota_exhausted" if is_quota else "service_error",
         }
 
     return _parse_response(raw_text)

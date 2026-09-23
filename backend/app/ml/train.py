@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))  # allow `p
 
 from app.ingestion.indicators import compute_indicators
 from app.ingestion.market_data_client import fetch_recent_bars
-from app.ml.features import FEATURE_COLUMNS, build_feature_frame
+from app.ml.features import DIRECTION_LABELS, FEATURE_COLUMNS, build_feature_frame
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,12 +42,23 @@ TICKER_BASKET = [
 FLAT_THRESHOLD = 0.002  # +/-0.2% dead zone for the direction classifier
 
 
-async def _fetch_ticker_history(ticker: str) -> pd.DataFrame | None:
-    try:
-        bars = await fetch_recent_bars(ticker, interval="1day", output_size=500)  # Infoway's per-call cap
-    except Exception as e:  # noqa: BLE001 - any single ticker failing shouldn't kill the run
-        logger.warning("Skipping %s: %s", ticker, e)
+async def _fetch_ticker_history(ticker: str, retries: int = 3) -> pd.DataFrame | None:
+    for attempt in range(retries):
+        try:
+            bars = await fetch_recent_bars(ticker, interval="1day", output_size=500)  # Infoway's per-call cap
+            break
+        except Exception as e:  # noqa: BLE001
+            is_rate_limited = "429" in str(e)
+            if is_rate_limited and attempt < retries - 1:
+                backoff = 2.0 * (attempt + 1)
+                logger.info("Rate-limited on %s, retrying in %.0fs (attempt %d/%d)...", ticker, backoff, attempt + 1, retries)
+                await asyncio.sleep(backoff)
+                continue
+            logger.warning("Skipping %s: %s", ticker, e)
+            return None
+    else:
         return None
+
     if len(bars) < 60:
         logger.warning("Skipping %s: only %d bars returned", ticker, len(bars))
         return None
@@ -69,7 +80,9 @@ def _label(df: pd.DataFrame) -> pd.DataFrame:
 
 async def build_training_set() -> pd.DataFrame:
     frames = []
-    for ticker in TICKER_BASKET:
+    for i, ticker in enumerate(TICKER_BASKET):
+        if i > 0:
+            await asyncio.sleep(1.0)  # stay under Infoway's rate limit rather than hit 429s and retry
         df = await _fetch_ticker_history(ticker)
         if df is None:
             continue
@@ -104,14 +117,26 @@ def train_and_save(df: pd.DataFrame) -> None:
     from sklearn.metrics import accuracy_score, mean_absolute_error
 
     train_df, val_df = time_based_split(df)
-    x_train, x_val = train_df[FEATURE_COLUMNS], val_df[FEATURE_COLUMNS]
+    # Force plain float64 explicitly - a feature column that picked up pd.NA anywhere
+    # upstream silently becomes `object` dtype, which XGBoost rejects outright at fit()
+    # time with a fairly opaque error. Cheap safety net now that this has bitten once.
+    x_train = train_df[FEATURE_COLUMNS].astype("float64")
+    x_val = val_df[FEATURE_COLUMNS].astype("float64")
+
+    # XGBoost's sklearn wrapper requires integer class labels (0..n-1), not strings -
+    # encode "up"/"down"/"flat" through the shared DIRECTION_LABELS order (see
+    # app/ml/features.py) so model.py can decode predict_proba's columns back the same
+    # way at inference time.
+    label_to_idx = {label: i for i, label in enumerate(DIRECTION_LABELS)}
+    y_train_encoded = train_df["direction"].map(label_to_idx)
+    y_val_encoded = val_df["direction"].map(label_to_idx)
 
     classifier = xgb.XGBClassifier(
         n_estimators=200, max_depth=4, learning_rate=0.05, objective="multi:softprob", eval_metric="mlogloss"
     )
-    classifier.fit(x_train, train_df["direction"])
+    classifier.fit(x_train, y_train_encoded)
     val_pred = classifier.predict(x_val)
-    acc = accuracy_score(val_df["direction"], val_pred)
+    acc = accuracy_score(y_val_encoded, val_pred)
     baseline_acc = val_df["direction"].value_counts(normalize=True).max()
     logger.info("Classifier validation accuracy: %.4f (naive baseline: %.4f)", acc, baseline_acc)
 

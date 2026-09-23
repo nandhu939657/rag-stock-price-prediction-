@@ -103,13 +103,13 @@ export function StockDetailPage() {
               </section>
               <section>
                 <h2 className="kicker">Latest recommendation</h2>
-                <ReasoningPanel recommendation={latestRecommendation} />
+                <ReasoningPanel recommendation={latestRecommendation} sources={data.sources} />
               </section>
             </div>
           )}
 
           {tab === "sources" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 760 }}>
               {data.sources.length === 0 ? (
                 <div className="empty-state">
                   No news retrieved yet for this stock. Sources refresh roughly hourly once tracked, or immediately on
